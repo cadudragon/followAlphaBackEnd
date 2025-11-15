@@ -1,0 +1,576 @@
+using System.Numerics;
+using Microsoft.Extensions.Logging;
+using TrackFi.Application.Portfolio.DTOs;
+using TrackFi.Domain.Entities;
+using TrackFi.Domain.Enums;
+using TrackFi.Domain.Interfaces;
+using TrackFi.Infrastructure.Blockchain;
+using TrackFi.Infrastructure.Caching;
+
+namespace TrackFi.Infrastructure.Portfolio;
+
+/// <summary>
+/// Service for fetching and aggregating portfolio data for anonymous (unauthenticated) wallets.
+/// Data is cached in Redis with TTL and NOT persisted to database.
+/// Only verified/whitelisted tokens are returned to users.
+/// </summary>
+public class AnonymousPortfolioService
+{
+    private readonly AlchemyService _alchemyService;
+    private readonly CoinGeckoService _coinGeckoService;
+    private readonly DistributedCacheService _cacheService;
+    private readonly IVerifiedTokenRepository _verifiedTokenRepository;
+    private readonly ILogger<AnonymousPortfolioService> _logger;
+
+    public AnonymousPortfolioService(
+        AlchemyService alchemyService,
+        CoinGeckoService coinGeckoService,
+        DistributedCacheService cacheService,
+        IVerifiedTokenRepository verifiedTokenRepository,
+        ILogger<AnonymousPortfolioService> logger)
+    {
+        _alchemyService = alchemyService ?? throw new ArgumentNullException(nameof(alchemyService));
+        _coinGeckoService = coinGeckoService ?? throw new ArgumentNullException(nameof(coinGeckoService));
+        _cacheService = cacheService ?? throw new ArgumentNullException(nameof(cacheService));
+        _verifiedTokenRepository = verifiedTokenRepository ?? throw new ArgumentNullException(nameof(verifiedTokenRepository));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    /// <summary>
+    /// Get portfolio aggregated across all supported networks (Ethereum, Polygon, Arbitrum, Base, Unichain).
+    /// </summary>
+    public async Task<MultiNetworkPortfolioDto> GetMultiNetworkPortfolioAsync(
+        string walletAddress,
+        CancellationToken cancellationToken = default)
+    {
+        var networks = new[]
+        {
+            BlockchainNetwork.Ethereum,
+            BlockchainNetwork.Polygon,
+            BlockchainNetwork.Arbitrum,
+            BlockchainNetwork.Base,
+            BlockchainNetwork.Unichain
+        };
+
+        // Fetch all networks in parallel
+        var portfolioTasks = networks.Select(network =>
+            GetPortfolioPreviewAsync(walletAddress, network, cancellationToken)
+        ).ToArray();
+
+        var portfolios = await Task.WhenAll(portfolioTasks);
+
+        // Aggregate results
+        var allTokens = portfolios.SelectMany(p => p.Tokens).ToList();
+        var allNfts = portfolios.SelectMany(p => p.Nfts).ToList();
+
+        // Calculate aggregated summary
+        var summary = CalculateSummary(allTokens, allNfts);
+
+        // Build network-specific data
+        var networkData = networks.Zip(portfolios, (network, portfolio) => new NetworkPortfolioDto
+        {
+            Network = network.ToString(),
+            TotalValueUsd = portfolio.Summary.TotalValueUsd,
+            Tokens = portfolio.Tokens,
+            Nfts = portfolio.Nfts,
+            TokenCount = portfolio.Tokens.Count,
+            NftCount = portfolio.Nfts.Count
+        }).ToList();
+
+        return new MultiNetworkPortfolioDto
+        {
+            WalletAddress = walletAddress,
+            IsAnonymous = true,
+            Summary = summary,
+            Networks = networkData,
+            CacheExpiresAt = DateTime.UtcNow.AddMinutes(3) // Shortest cache TTL (portfolio data)
+        };
+    }
+
+    /// <summary>
+    /// Get complete portfolio preview for a wallet (tokens + NFTs + summary).
+    /// </summary>
+    public async Task<PortfolioPreviewDto> GetPortfolioPreviewAsync(
+        string walletAddress,
+        BlockchainNetwork network,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = DistributedCacheService.GenerateKey("portfolio", "preview", network.ToString(), walletAddress);
+        var cached = await _cacheService.GetAsync<PortfolioPreviewDto>(cacheKey, cancellationToken);
+
+        if (cached != null)
+        {
+            _logger.LogInformation("Portfolio cache hit for {Wallet}", walletAddress);
+            return cached;
+        }
+
+        _logger.LogInformation("Portfolio cache miss for {Wallet}, fetching from blockchain", walletAddress);
+
+        // Fetch tokens and NFTs in parallel
+        var tokensTask = GetTokenBalancesAsync(walletAddress, network, cancellationToken);
+        var nftsTask = GetNftsAsync(walletAddress, network, cancellationToken);
+
+        await Task.WhenAll(tokensTask, nftsTask);
+
+        var tokens = await tokensTask;
+        var nfts = await nftsTask;
+
+        // Calculate summary
+        var summary = CalculateSummary(tokens, nfts);
+
+        var portfolio = new PortfolioPreviewDto
+        {
+            WalletAddress = walletAddress,
+            Network = network.ToString(),
+            IsAnonymous = true,
+            Summary = summary,
+            Tokens = tokens,
+            Nfts = nfts,
+            CacheExpiresAt = DateTime.UtcNow.AddMinutes(15)
+        };
+
+        // Cache for 15 minutes
+        await _cacheService.SetAsync(cacheKey, portfolio, TimeSpan.FromMinutes(15), cancellationToken);
+
+        return portfolio;
+    }
+
+    /// <summary>
+    /// Get token balances with prices for a wallet.
+    /// Balance data is cached for 3 minutes, prices are fetched fresh (1-min cache) on each request.
+    /// </summary>
+    public async Task<List<TokenBalanceDto>> GetTokenBalancesAsync(
+        string walletAddress,
+        BlockchainNetwork network,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = DistributedCacheService.GenerateKey("tokens_balances", network.ToString(), walletAddress);
+        var cachedBalances = await _cacheService.GetAsync<List<CachedTokenBalance>>(cacheKey, cancellationToken);
+
+        List<CachedTokenBalance> balances;
+
+        if (cachedBalances != null)
+        {
+            _logger.LogInformation("Token balances cache HIT for {Wallet} ({Count} tokens)", walletAddress, cachedBalances.Count);
+            balances = cachedBalances;
+        }
+        else
+        {
+            _logger.LogInformation("Token balances cache MISS for {Wallet}, fetching from blockchain", walletAddress);
+            balances = await FetchTokenBalancesFromBlockchainAsync(walletAddress, network, cancellationToken);
+
+            // Cache balance data (without prices) for 3 minutes
+            await _cacheService.SetAsync(cacheKey, balances, TimeSpan.FromMinutes(3), cancellationToken);
+        }
+
+        // ALWAYS fetch fresh prices (uses 1-min cache internally)
+        var tokens = await EnrichBalancesWithPricesAsync(balances, network, cancellationToken);
+
+        // Sort by value (highest first)
+        tokens = tokens.OrderByDescending(t => t.ValueUsd ?? 0).ToList();
+
+        _logger.LogInformation("Returning {Count} tokens for {Wallet} with fresh prices", tokens.Count, walletAddress);
+
+        return tokens;
+    }
+
+    /// <summary>
+    /// Fetch token balances from blockchain (without prices).
+    /// </summary>
+    private async Task<List<CachedTokenBalance>> FetchTokenBalancesFromBlockchainAsync(
+        string walletAddress,
+        BlockchainNetwork network,
+        CancellationToken cancellationToken)
+    {
+        var balances = new List<CachedTokenBalance>();
+
+        try
+        {
+            // Load verified tokens whitelist for this network
+            var verifiedTokens = await _verifiedTokenRepository.GetVerifiedTokensAsync(network, cancellationToken);
+            _logger.LogInformation("Loaded {Count} verified tokens for {Network}", verifiedTokens.Count, network);
+
+            // Get native balance (ETH, MATIC, etc.)
+            var nativeBalance = await _alchemyService.GetNativeBalanceAsync(walletAddress, network, cancellationToken);
+
+            // DEBUG: Log Unichain native balance
+            if (network == BlockchainNetwork.Unichain)
+            {
+                _logger.LogWarning("[UNICHAIN DEBUG] Native balance (hex): {Balance}", nativeBalance);
+            }
+
+            var nativeTokenBalance = BuildCachedNativeTokenBalance(nativeBalance, network);
+            if (nativeTokenBalance != null)
+            {
+                balances.Add(nativeTokenBalance);
+
+                // DEBUG: Log Unichain native balance formatted
+                if (network == BlockchainNetwork.Unichain)
+                {
+                    _logger.LogWarning("[UNICHAIN DEBUG] Native balance formatted: {Balance} {Symbol}",
+                        nativeTokenBalance.BalanceFormatted, nativeTokenBalance.Symbol);
+                }
+            }
+            else if (network == BlockchainNetwork.Unichain)
+            {
+                _logger.LogWarning("[UNICHAIN DEBUG] Native balance is NULL or zero");
+            }
+
+            // Get ERC20 token balances
+            var tokenBalances = await _alchemyService.GetTokenBalancesAsync(walletAddress, network, cancellationToken);
+
+            // DEBUG: Log Unichain token balances from Alchemy
+            if (network == BlockchainNetwork.Unichain)
+            {
+                _logger.LogWarning("[UNICHAIN DEBUG] Alchemy returned {Count} total tokens", tokenBalances.Count);
+                foreach (var tb in tokenBalances)
+                {
+                    _logger.LogWarning("[UNICHAIN DEBUG] Token: {Address}, Balance: {Balance}",
+                        tb.ContractAddress, tb.TokenBalance);
+                }
+            }
+
+            // Filter to only verified tokens
+            var verifiedBalances = tokenBalances
+                .Where(tb => verifiedTokens.ContainsKey(tb.ContractAddress.ToLowerInvariant()))
+                .ToList();
+
+            // DEBUG: Log Unichain filtering results
+            if (network == BlockchainNetwork.Unichain)
+            {
+                _logger.LogWarning("[UNICHAIN DEBUG] After filtering: {Count} verified tokens", verifiedBalances.Count);
+                _logger.LogWarning("[UNICHAIN DEBUG] Verified tokens whitelist has {Count} entries", verifiedTokens.Count);
+                foreach (var vt in verifiedTokens.Take(5))
+                {
+                    _logger.LogWarning("[UNICHAIN DEBUG] Whitelist entry: {Address} ({Symbol})",
+                        vt.Key, vt.Value.Symbol);
+                }
+            }
+
+            _logger.LogInformation("Filtered to {Count} verified tokens out of {Total} total",
+                verifiedBalances.Count, tokenBalances.Count);
+
+            if (verifiedBalances.Any())
+            {
+                // Fetch metadata and build cached balance objects
+                var tokenTasks = verifiedBalances.Select(async tb =>
+                {
+                    try
+                    {
+                        var metadata = await _alchemyService.GetTokenMetadataAsync(tb.ContractAddress, network, cancellationToken);
+                        if (metadata == null || metadata.Decimals == null)
+                        {
+                            _logger.LogWarning("No metadata for token {Contract}", tb.ContractAddress);
+                            return null;
+                        }
+
+                        var balance = HexToBigInteger(tb.TokenBalance);
+                        var decimals = metadata.Decimals.Value;
+                        var balanceFormatted = ConvertToDecimal(balance, decimals);
+
+                        // Skip tokens with zero balance
+                        if (balanceFormatted <= 0)
+                            return null;
+
+                        return new CachedTokenBalance
+                        {
+                            ContractAddress = tb.ContractAddress,
+                            Network = network.ToString(),
+                            Symbol = metadata.Symbol ?? "UNKNOWN",
+                            Name = metadata.Name ?? "Unknown Token",
+                            Balance = tb.TokenBalance,
+                            Decimals = decimals,
+                            BalanceFormatted = balanceFormatted,
+                            LogoUrl = metadata.Logo,
+                            IsNative = false
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error processing token {Contract}", tb.ContractAddress);
+                        return null;
+                    }
+                });
+
+                var tokenResults = await Task.WhenAll(tokenTasks);
+                balances.AddRange(tokenResults.Where(t => t != null)!);
+            }
+
+            return balances;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error fetching token balances for {Wallet}", walletAddress);
+            return balances;
+        }
+    }
+
+    /// <summary>
+    /// Enrich cached balance data with fresh prices.
+    /// </summary>
+    private async Task<List<TokenBalanceDto>> EnrichBalancesWithPricesAsync(
+        List<CachedTokenBalance> balances,
+        BlockchainNetwork network,
+        CancellationToken cancellationToken)
+    {
+        if (!balances.Any())
+            return new List<TokenBalanceDto>();
+
+        // Build list of token addresses to fetch prices for
+        var tokenAddresses = new List<(string address, BlockchainNetwork network)>();
+
+        // Add wrapped token for native token pricing (WETH for ETH chains, WMATIC for Polygon)
+        var nativeToken = balances.FirstOrDefault(b => b.IsNative);
+        if (nativeToken != null)
+        {
+            var nativeTokenPriceAddress = GetNativeTokenPriceAddress(network);
+            if (nativeTokenPriceAddress != null)
+            {
+                tokenAddresses.Add((nativeTokenPriceAddress, network));
+            }
+        }
+
+        // Add ERC20 token addresses
+        var erc20Tokens = balances.Where(b => !b.IsNative && !string.IsNullOrEmpty(b.ContractAddress)).ToList();
+        tokenAddresses.AddRange(erc20Tokens.Select(t => (t.ContractAddress!, network)));
+
+        // Fetch all prices in a single batch (uses 1-min cache)
+        var prices = tokenAddresses.Count != 0
+            ? await _alchemyService.GetTokenPricesByAddressesAsync(tokenAddresses, cancellationToken)
+            : [];
+
+        _logger.LogInformation("Fetched {Count} fresh prices for enrichment", prices.Count);
+
+        // Build final DTOs with prices
+        var tokens = balances.Select(b =>
+        {
+            decimal? priceUsd = null;
+
+            if (b.IsNative)
+            {
+                // Use wrapped token price for native token (WETH for ETH, WMATIC for MATIC)
+                var nativeTokenPriceAddress = GetNativeTokenPriceAddress(network);
+                if (nativeTokenPriceAddress != null)
+                {
+                    priceUsd = prices.TryGetValue(nativeTokenPriceAddress.ToLowerInvariant(), out var price)
+                        ? (decimal?)price
+                        : null;
+                }
+            }
+            else if (!string.IsNullOrEmpty(b.ContractAddress))
+            {
+                // Use token's own price
+                priceUsd = prices.TryGetValue(b.ContractAddress.ToLowerInvariant(), out var price)
+                    ? (decimal?)price
+                    : null;
+            }
+
+            return new TokenBalanceDto
+            {
+                ContractAddress = b.ContractAddress,
+                Network = b.Network,
+                Symbol = b.Symbol,
+                Name = b.Name,
+                Balance = b.Balance,
+                Decimals = b.Decimals,
+                BalanceFormatted = b.BalanceFormatted,
+                Price = priceUsd.HasValue ? new PriceInfoDto
+                {
+                    Usd = priceUsd.Value,
+                    LastUpdated = DateTime.UtcNow
+                } : null,
+                ValueUsd = priceUsd.HasValue ? b.BalanceFormatted * priceUsd.Value : null,
+                LogoUrl = b.LogoUrl
+            };
+        }).ToList();
+
+        return tokens;
+    }
+
+    private CachedTokenBalance? BuildCachedNativeTokenBalance(
+        string hexBalance,
+        BlockchainNetwork network)
+    {
+        try
+        {
+            var balance = HexToBigInteger(hexBalance);
+            var balanceFormatted = ConvertToDecimal(balance, 18); // Native tokens have 18 decimals
+
+            if (balanceFormatted <= 0)
+                return null;
+
+            var (symbol, name) = GetNativeTokenInfo(network);
+
+            return new CachedTokenBalance
+            {
+                ContractAddress = null, // Native token
+                Network = network.ToString(),
+                Symbol = symbol,
+                Name = name,
+                Balance = hexBalance,
+                Decimals = 18,
+                BalanceFormatted = balanceFormatted,
+                IsNative = true
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error building cached native token balance for {Network}", network);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get NFTs owned by a wallet.
+    /// </summary>
+    public async Task<List<NftDto>> GetNftsAsync(
+        string walletAddress,
+        BlockchainNetwork network,
+        CancellationToken cancellationToken = default)
+    {
+        var cacheKey = DistributedCacheService.GenerateKey("nfts", network.ToString(), walletAddress);
+        var cached = await _cacheService.GetAsync<List<NftDto>>(cacheKey, cancellationToken);
+
+        if (cached != null)
+        {
+            _logger.LogInformation("NFTs cache hit for {Wallet}", walletAddress);
+            return cached;
+        }
+
+        _logger.LogInformation("NFTs cache miss for {Wallet}, fetching from Alchemy", walletAddress);
+
+        try
+        {
+            var alchemyNfts = await _alchemyService.GetNftsAsync(walletAddress, network, cancellationToken);
+
+            var nfts = alchemyNfts.Select(nft => new NftDto
+            {
+                ContractAddress = nft.Contract.Address,
+                TokenId = nft.Id.TokenId,
+                Network = network.ToString(),
+                Name = nft.Title ?? nft.Metadata?.Name,
+                Description = nft.Description ?? nft.Metadata?.Description,
+                CollectionName = nft.Contract.Name,
+                ImageUrl = nft.Metadata?.Image,
+                ExternalUrl = nft.Metadata?.ExternalUrl,
+                TokenStandard = nft.Contract.TokenType ?? "ERC721",
+                Balance = nft.Contract.TokenType == "ERC1155" ? 1 : null // Simplified for V1
+            }).ToList();
+
+            // Cache for 30 minutes (NFTs change less frequently)
+            await _cacheService.SetAsync(cacheKey, nfts, TimeSpan.FromMinutes(30), cancellationToken);
+
+            _logger.LogInformation("Found {Count} NFTs for {Wallet}", nfts.Count, walletAddress);
+
+            return nfts;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error fetching NFTs for {Wallet}", walletAddress);
+            return new List<NftDto>();
+        }
+    }
+
+
+    private PortfolioSummaryDto CalculateSummary(List<TokenBalanceDto> tokens, List<NftDto> nfts)
+    {
+        var tokensValue = tokens.Sum(t => t.ValueUsd ?? 0);
+        var nftsValue = nfts.Sum(n => n.EstimatedValueUsd ?? 0);
+        var totalValue = tokensValue + nftsValue;
+
+        // Calculate 24h change (weighted by token value)
+        var totalChange24h = tokens
+            .Where(t => t.ValueUsd.HasValue && t.Change24h.HasValue && t.ValueUsd.Value > 0)
+            .Sum(t => (t.ValueUsd!.Value * (t.Change24h!.Value / 100)));
+
+        var change24hPercentage = totalValue > 0 ? (totalChange24h / totalValue) * 100 : 0;
+
+        return new PortfolioSummaryDto
+        {
+            TotalValueUsd = totalValue,
+            Change24hUsd = totalChange24h,
+            Change24hPercentage = change24hPercentage,
+            Breakdown = new BreakdownDto
+            {
+                TokensValueUsd = tokensValue,
+                NftsValueUsd = nftsValue,
+                DefiValueUsd = 0 // V2 feature
+            },
+            Counts = new CountsDto
+            {
+                Tokens = tokens.Count,
+                Nfts = nfts.Count,
+                DefiPositions = 0 // V2 feature
+            },
+            LastUpdated = DateTime.UtcNow
+        };
+    }
+
+    private static (string symbol, string name) GetNativeTokenInfo(BlockchainNetwork network)
+    {
+        return network switch
+        {
+            BlockchainNetwork.Ethereum => ("ETH", "Ethereum"),
+            BlockchainNetwork.Polygon => ("MATIC", "Polygon"),
+            BlockchainNetwork.Arbitrum => ("ETH", "Ethereum"),
+            BlockchainNetwork.Base => ("ETH", "Ethereum"),
+            BlockchainNetwork.Unichain => ("ETH", "Ethereum"),
+            _ => ("ETH", "Ethereum")
+        };
+    }
+
+    private static string? GetNativeTokenPriceAddress(BlockchainNetwork network)
+    {
+        return network switch
+        {
+            BlockchainNetwork.Ethereum => "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
+            BlockchainNetwork.Polygon => "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270", // WMATIC (Wrapped MATIC)
+            BlockchainNetwork.Arbitrum => "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH
+            BlockchainNetwork.Base => "0x4200000000000000000000000000000000000006", // WETH
+            BlockchainNetwork.Unichain => "0x4200000000000000000000000000000000000006", // WETH
+            _ => null
+        };
+    }
+
+    private static BigInteger HexToBigInteger(string hex)
+    {
+        if (string.IsNullOrWhiteSpace(hex) || hex == "0x0")
+            return BigInteger.Zero;
+
+        hex = hex.StartsWith("0x") ? hex[2..] : hex;
+
+        // Prepend '0' to ensure the value is parsed as positive (high bit = 0)
+        // Without this, hex values starting with 8-f are parsed as negative
+        return BigInteger.Parse("0" + hex, System.Globalization.NumberStyles.HexNumber);
+    }
+
+    private static decimal ConvertToDecimal(BigInteger value, int decimals)
+    {
+        if (value.IsZero)
+            return 0;
+
+        var divisor = BigInteger.Pow(10, decimals);
+        var wholePart = BigInteger.Divide(value, divisor);
+        var remainder = BigInteger.Remainder(value, divisor);
+
+        var decimalPart = (decimal)remainder / (decimal)divisor;
+        return (decimal)wholePart + decimalPart;
+    }
+}
+
+/// <summary>
+/// Internal model for caching token balance data WITHOUT prices.
+/// Cached for 3 minutes, prices are fetched fresh on each request.
+/// </summary>
+internal class CachedTokenBalance
+{
+    public string? ContractAddress { get; set; }
+    public string Network { get; set; } = string.Empty;
+    public string Symbol { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Balance { get; set; } = "0";
+    public int Decimals { get; set; }
+    public decimal BalanceFormatted { get; set; }
+    public string? LogoUrl { get; set; }
+    public bool IsNative { get; set; }
+}

@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>8520ac6a-4825-41e8-a516-b0f0e9c3f7cd</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.10">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Scalar.AspNetCore" Version="2.9.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore.ReDoc" Version="9.0.6" />
+    <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="9.0.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TrackFi.Application\TrackFi.Application.csproj" />
+    <ProjectReference Include="..\TrackFi.Infrastructure\TrackFi.Infrastructure.csproj" />
+    <ProjectReference Include="..\TrackFi.ServiceDefaults\TrackFi.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+</Project>
