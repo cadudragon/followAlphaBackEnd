@@ -26,7 +26,7 @@ public class ZerionService(
             throw new ArgumentException("Wallet address is required", nameof(walletAddress));
 
         var chainId = MapNetworkToChainId(network);
-        var response = await _walletClient.GetPositionsAsync(walletAddress, new[] { chainId }, cancellationToken);
+        var response = await _walletClient.GetPositionsAsync(walletAddress, new[] { chainId }, "only_complex", cancellationToken);
 
         var positions = response.Data.Select(MapToPositionData).ToList();
 

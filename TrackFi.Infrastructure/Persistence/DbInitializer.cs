@@ -86,111 +86,13 @@ public class DbInitializer(TrackFiDbContext context, ILogger<DbInitializer> logg
 
             _logger.LogInformation("Created {Count} sample watchlist entries", 6);
 
-            // Seed verified tokens for Base network (user's example)
-            var verifiedTokens = new List<VerifiedToken>
-            {
-                // Native ETH on Base
-                new VerifiedToken(
-                    contractAddress: "0x0000000000000000000000000000000000000000",
-                    network: BlockchainNetwork.Base,
-                    symbol: "ETH",
-                    name: "Ethereum",
-                    decimals: 18,
-                    logoUrl: "https://assets.coingecko.com/coins/images/279/small/ethereum.png",
-                    coinGeckoId: "ethereum",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://ethereum.org",
-                    description: "Ethereum is a decentralized platform for applications.",
-                    isNative: true,
-                    verifiedBy: "system"),
-
-                // Cake on Base
-                new VerifiedToken(
-                    contractAddress: "0x3055913c90Fcc1A6CE9a358911721eEb942013A1".ToLowerInvariant(),
-                    network: BlockchainNetwork.Base,
-                    symbol: "CAKE",
-                    name: "PancakeSwap",
-                    decimals: 18,
-                    logoUrl: "https://assets.coingecko.com/coins/images/12632/small/pancakeswap-cake-logo.png",
-                    coinGeckoId: "pancakeswap-token",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://pancakeswap.finance",
-                    description: "PancakeSwap is a decentralized exchange on BSC and other chains.",
-                    isNative: false,
-                    verifiedBy: "system"),
-
-                // AERO on Base
-                new VerifiedToken(
-                    contractAddress: "0x940181a94A35A4569E4529A3CDfB74e38FD98631".ToLowerInvariant(),
-                    network: BlockchainNetwork.Base,
-                    symbol: "AERO",
-                    name: "Aerodrome Finance",
-                    decimals: 18,
-                    logoUrl: null,
-                    coinGeckoId: "aerodrome-finance",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://aerodrome.finance",
-                    description: "Aerodrome is a next-generation AMM designed for Base.",
-                    isNative: false,
-                    verifiedBy: "system"),
-
-                // WETH on Base
-                new VerifiedToken(
-                    contractAddress: "0x4200000000000000000000000000000000000006".ToLowerInvariant(),
-                    network: BlockchainNetwork.Base,
-                    symbol: "WETH",
-                    name: "Wrapped Ether",
-                    decimals: 18,
-                    logoUrl: "https://assets.coingecko.com/coins/images/2518/small/weth.png",
-                    coinGeckoId: "weth",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://weth.io",
-                    description: "Wrapped Ether is the ERC20 version of ETH.",
-                    isNative: false,
-                    verifiedBy: "system"),
-
-                // USDC on Base
-                new VerifiedToken(
-                    contractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".ToLowerInvariant(),
-                    network: BlockchainNetwork.Base,
-                    symbol: "USDC",
-                    name: "USD Coin",
-                    decimals: 6,
-                    logoUrl: "https://assets.coingecko.com/coins/images/6319/small/USD_Coin_icon.png",
-                    coinGeckoId: "usd-coin",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://www.circle.com/usdc",
-                    description: "USDC is a fully reserved stablecoin pegged to the US Dollar.",
-                    isNative: false,
-                    verifiedBy: "system"),
-
-                // cbBTC on Base
-                new VerifiedToken(
-                    contractAddress: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".ToLowerInvariant(),
-                    network: BlockchainNetwork.Base,
-                    symbol: "cbBTC",
-                    name: "Coinbase Wrapped BTC",
-                    decimals: 8,
-                    logoUrl: null,
-                    coinGeckoId: "coinbase-wrapped-btc",
-                    standard: TokenStandard.ERC20,
-                    websiteUrl: "https://www.coinbase.com",
-                    description: "Coinbase Wrapped BTC is a Bitcoin-backed ERC20 token.",
-                    isNative: false,
-                    verifiedBy: "system")
-            };
-
-            await _context.VerifiedTokens.AddRangeAsync(verifiedTokens);
-            await _context.SaveChangesAsync();
-
-            _logger.LogInformation("Created {Count} verified tokens for Base network", verifiedTokens.Count);
+            // REMOVED: Verified tokens seeding - no longer needed with Zerion only_non_trash filter
 
             _logger.LogInformation("Database seeding completed successfully!");
             _logger.LogInformation("Sample data summary:");
             _logger.LogInformation("  - Users: 4 (Ethereum, Polygon, Solana, Arbitrum)");
             _logger.LogInformation("  - User Wallets: 4 (2 verified, 2 unverified)");
             _logger.LogInformation("  - Watchlist Entries: 6");
-            _logger.LogInformation("  - Verified Tokens: {Count} (Base network)", verifiedTokens.Count);
         }
         catch (Exception ex)
         {
@@ -289,7 +191,7 @@ public class DbInitializer(TrackFiDbContext context, ILogger<DbInitializer> logg
         _context.Watchlist.RemoveRange(_context.Watchlist);
         _context.UserWallets.RemoveRange(_context.UserWallets);
         _context.Users.RemoveRange(_context.Users);
-        _context.VerifiedTokens.RemoveRange(_context.VerifiedTokens);
+        // REMOVED: VerifiedTokens table no longer exists
 
         await _context.SaveChangesAsync();
 

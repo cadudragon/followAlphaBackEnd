@@ -19,9 +19,10 @@ public class TrackFiDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<UserWallet> UserWallets => Set<UserWallet>();
     public DbSet<WatchlistEntry> Watchlist => Set<WatchlistEntry>();
-    public DbSet<VerifiedToken> VerifiedTokens => Set<VerifiedToken>();
-    public DbSet<UnlistedToken> UnlistedTokens => Set<UnlistedToken>();
-    public DbSet<TokenMetadata> TokenMetadata => Set<TokenMetadata>();
+    // REMOVED: Token verification tables (not needed with Zerion)
+    // public DbSet<VerifiedToken> VerifiedTokens => Set<VerifiedToken>();
+    // public DbSet<UnlistedToken> UnlistedTokens => Set<UnlistedToken>();
+    // public DbSet<TokenMetadata> TokenMetadata => Set<TokenMetadata>();
     public DbSet<NetworkMetadata> NetworkMetadata => Set<NetworkMetadata>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -106,56 +107,7 @@ public class TrackFiDbContext : DbContext
                 .HasConversion(converterBlockchainNetwork);
         });
 
-        // VerifiedToken entity
-        modelBuilder.Entity<VerifiedToken>(entity =>
-        {
-            entity.Property(e => e.Network)
-                .HasConversion(converterBlockchainNetwork);
-
-            entity.Property(e => e.Status)
-                .HasConversion(converterVerificationStatus);
-
-            entity.Property(e => e.Standard)
-                .HasConversion(converterTokenStandard);
-
-            // Create unique index on (ContractAddress, Network) for fast lookups
-            entity.HasIndex(e => new { e.ContractAddress, e.Network })
-                .IsUnique();
-
-            // Index on status for filtering
-            entity.HasIndex(e => e.Status);
-        });
-
-        // UnlistedToken entity
-        modelBuilder.Entity<UnlistedToken>(entity =>
-        {
-            entity.Property(e => e.Network)
-                .HasConversion(converterBlockchainNetwork);
-
-            // Create unique index on (ContractAddress, Network) for fast lookups
-            entity.HasIndex(e => new { e.ContractAddress, e.Network })
-                .IsUnique();
-
-            // Index on LastCheckedAt for cleanup queries
-            entity.HasIndex(e => e.LastCheckedAt);
-        });
-
-        // TokenMetadata entity
-        modelBuilder.Entity<TokenMetadata>(entity =>
-        {
-            entity.Property(e => e.Network)
-                .HasConversion(converterBlockchainNetwork);
-
-            // Create unique index on (ContractAddress, Network) for fast lookups
-            entity.HasIndex(e => new { e.ContractAddress, e.Network })
-                .IsUnique();
-
-            // Index on EncounterCount for analytics queries
-            entity.HasIndex(e => e.EncounterCount);
-
-            // Index on Symbol for search features
-            entity.HasIndex(e => e.Symbol);
-        });
+        // REMOVED: Token verification entity configurations (not needed with Zerion)
 
         // NetworkMetadata entity
         modelBuilder.Entity<NetworkMetadata>(entity =>

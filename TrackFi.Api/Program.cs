@@ -77,8 +77,9 @@ app.UseCors();
 app.MapHealthChecks("/health");
 
 // Map API endpoints
-app.MapPortfolioPreviewEndpoints(); // Anonymous portfolio (no auth required)
-app.MapDeFiEndpoints(); // DeFi positions (Zerion API)
+app.MapPortfolioEndpoints(); // NEW: Unified portfolio endpoints (wallet + DeFi via Zerion)
+// app.MapPortfolioPreviewEndpoints(); // OLD: Removed - replaced by MapPortfolioEndpoints
+// app.MapDeFiEndpoints(); // OLD: Removed - replaced by MapPortfolioEndpoints
 app.MapUserEndpoints();
 app.MapUserWalletEndpoints();
 app.MapWatchlistEndpoints();

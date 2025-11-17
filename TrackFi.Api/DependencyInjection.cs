@@ -3,12 +3,14 @@ using FluentValidation;
 using Microsoft.EntityFrameworkCore;
 using NetZerion.Extensions;
 using TrackFi.Application.Common.Behaviors;
+using TrackFi.Application.Interfaces;
 using TrackFi.Domain.Interfaces;
 using TrackFi.Infrastructure.Blockchain;
 using TrackFi.Infrastructure.Caching;
 using TrackFi.Infrastructure.Common.Handlers;
 using TrackFi.Infrastructure.DeFi;
 using TrackFi.Infrastructure.Portfolio;
+using TrackFi.Infrastructure.Portfolio.Providers;
 using TrackFi.Infrastructure.Providers;
 using TrackFi.Infrastructure.Persistence;
 using TrackFi.Infrastructure.Persistence.Repositories;
@@ -75,9 +77,10 @@ public static class DependencyInjection
         services.AddScoped<IUserRepository, UserRepository>();
         services.AddScoped<IUserWalletRepository, UserWalletRepository>();
         services.AddScoped<IWatchlistRepository, WatchlistRepository>();
-        services.AddScoped<IVerifiedTokenRepository, VerifiedTokenRepository>();
-        services.AddScoped<UnlistedTokenRepository>();
-        services.AddScoped<TokenMetadataRepository>();
+        // REMOVED: Token verification repositories (not needed with Zerion)
+        // services.AddScoped<IVerifiedTokenRepository, VerifiedTokenRepository>();
+        // services.AddScoped<UnlistedTokenRepository>();
+        // services.AddScoped<TokenMetadataRepository>();
         services.AddSingleton<INetworkMetadataRepository, NetworkMetadataRepository>(); // Singleton for in-memory cache
 
         // Add Web3 Services
@@ -110,11 +113,12 @@ public static class DependencyInjection
         services.AddHttpClient<AlchemyService>()
             .AddHttpMessageHandler<HttpLoggingHandler>();
 
-        // Add CoinMarketCap services
+        // Add CoinMarketCap services (kept for future use)
         services.Configure<CoinMarketCapOptions>(configuration.GetSection(CoinMarketCapOptions.SectionName));
         services.AddHttpClient<CoinMarketCapService>()
             .AddHttpMessageHandler<HttpLoggingHandler>();
-        services.AddScoped<TokenVerificationService>();
+        // REMOVED: TokenVerificationService (not needed with Zerion only_non_trash filter)
+        // services.AddScoped<TokenVerificationService>();
 
         // Configure DeFi provider options
         services.Configure<DeFiProviderOptions>(configuration.GetSection("DeFi"));
@@ -137,64 +141,13 @@ public static class DependencyInjection
             };
         });
 
-        // Add DeFi Data Provider Factory (supports Zerion and Moralis)
-        services.AddScoped<IDeFiDataProvider>(sp =>
-        {
-            var providerOptions = configuration.GetSection("DeFi").Get<DeFiProviderOptions>()
-                ?? new DeFiProviderOptions();
+        // Add Portfolio Provider (Zerion implementation)
+        // ZerionPortfolioProvider handles all aggregation, categorization, and transformation
+        services.AddScoped<IPortfolioProvider, ZerionPortfolioProvider>();
 
-            var logger = sp.GetRequiredService<ILoggerFactory>();
-
-            return providerOptions.Provider switch
-            {
-                DeFiProvider.Moralis => CreateMoralisService(sp, providerOptions, logger),
-                DeFiProvider.Zerion => CreateZerionService(sp, providerOptions, logger),
-                _ => throw new InvalidOperationException($"Unknown DeFi provider: {providerOptions.Provider}")
-            };
-        });
-
-        // Add DeFi Price Enrichment Service
-        services.AddScoped<DeFiPriceEnrichmentService>();
-
-        // Add Portfolio Services
-        services.AddScoped<AnonymousPortfolioService>();
-        services.AddScoped<DeFiPortfolioService>();
+        // Add Unified Portfolio Service (thin caching + orchestration layer)
+        services.AddScoped<PortfolioService>();
 
         return services;
-    }
-
-    /// <summary>
-    /// Creates a Zerion service instance.
-    /// </summary>
-    private static ZerionService CreateZerionService(
-        IServiceProvider sp,
-        DeFiProviderOptions options,
-        ILoggerFactory loggerFactory)
-    {
-        var walletClient = sp.GetRequiredService<NetZerion.Clients.IWalletClient>();
-        var logger = loggerFactory.CreateLogger<ZerionService>();
-
-        return new ZerionService(walletClient, logger);
-    }
-
-    /// <summary>
-    /// Creates a Moralis service instance.
-    /// </summary>
-    private static MoralisService CreateMoralisService(
-        IServiceProvider sp,
-        DeFiProviderOptions options,
-        ILoggerFactory loggerFactory)
-    {
-        var apiKey = options.Moralis.ApiKey
-            ?? throw new InvalidOperationException("Moralis API key is required when using Moralis provider");
-
-        var httpClient = new HttpClient();
-        var logger = loggerFactory.CreateLogger<MoralisService>();
-
-        return new MoralisService(
-            httpClient,
-            logger,
-            apiKey,
-            options.Moralis.BaseUrl);
     }
 }

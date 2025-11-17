@@ -1,4 +1,4 @@
-namespace TrackFi.Infrastructure.Portfolio;
+namespace TrackFi.Application.Portfolio.DTOs;
 
 /// <summary>
 /// Aggregated DeFi portfolio with positions grouped by category (matching DeBank structure).

@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
-using TrackFi.Domain.Enums;
 
 namespace TrackFi.Infrastructure.Blockchain;
 
